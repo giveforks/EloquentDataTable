@@ -2,11 +2,13 @@
 namespace LiveControl\EloquentDataTable;
 
 use Exception;
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Query\Expression as raw;
+use Illuminate\Support\Str;
 use LiveControl\EloquentDataTable\VersionTransformers\Version110Transformer;
 use LiveControl\EloquentDataTable\VersionTransformers\VersionTransformerContract;
+use Throwable;
 
 
 class DataTable
@@ -14,6 +16,7 @@ class DataTable
     protected $builder;
     protected $columns;
     protected $formatRowFunction;
+    protected $withApproximateCount = false;
 
     /**
      * @var VersionTransformerContract
@@ -25,6 +28,8 @@ class DataTable
 
     protected $total = 0;
     protected $filtered = 0;
+    protected $isApproximateCount = false;
+    protected $countThreshold = 10000;
 
     protected $rows = [];
 
@@ -89,6 +94,13 @@ class DataTable
         return $this;
     }
 
+    public function setCountThreshold(int $threshold): self
+    {
+        $this->countThreshold = $threshold;
+
+        return $this;
+    }
+
     /**
      * Make the datatable response.
      * @return array
@@ -126,12 +138,21 @@ class DataTable
                 )]) ? (int)$_POST[static::$versionTransformer->transform('draw')] : 0),
             static::$versionTransformer->transform('recordsTotal') => $this->total,
             static::$versionTransformer->transform('recordsFiltered') => $this->filtered,
-            static::$versionTransformer->transform('data') => $rows
+            static::$versionTransformer->transform('data') => $rows,
+            'isApproximateCount' => $this->isApproximateCount
         ];
     }
 
     protected function count()
     {
+        $approximateCount = $this->getApproximateCount();
+
+        if ($approximateCount !== null) {
+            $this->isApproximateCount = true;
+
+            return $approximateCount;
+        }
+
         $query = (method_exists($this->builder, 'getQuery') ? $this->builder->getQuery() : $this->builder);
         $connection = $query->getConnection();
 
@@ -148,6 +169,31 @@ class DataTable
         }
 
         return $result[0]->totalCount ?? 0;
+    }
+
+    public function withApproximateCount(bool $withApproximateCount = true): self
+    {
+        $this->withApproximateCount = $withApproximateCount;
+
+        return $this;
+    }
+
+    protected function getApproximateCount(): ?int
+    {
+        if (! $this->withApproximateCount || $this->getDatabaseDriver() !== 'mysql') {
+            return null;
+        }
+
+        try {
+            $exists = (clone $this->builder)
+                ->limit($this->countThreshold + 1)
+                ->skip($this->countThreshold)
+                ->exists();
+
+            return $exists ? $this->countThreshold : null;
+        } catch (Throwable $e) {
+            return null;
+        }
     }
 
     /**
@@ -287,7 +333,7 @@ class DataTable
             $result[] = $value;
         }
 
-        return (! $inForeach ? camel_case(implode('_', $result)) : $result);
+        return (! $inForeach ? Str::camel(implode('_', $result)) : $result);
     }
 
     /**
